@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: dashboard-gastos
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GITHUB_TOKEN
+        sync: false          # lo introduces manualmente en Render
+      - key: GITHUB_REPO
+        sync: false          # "tu-usuario/tu-repo"
+      - key: GITHUB_BRANCH
+        value: main

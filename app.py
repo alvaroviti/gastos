@@ -23,6 +23,7 @@ GH_REPO   = os.getenv("GITHUB_REPO",  "")      # "usuario/nombre-repo"
 GH_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 GH_PATH   = "data/gastos.json"                 # ruta dentro del repo
 
+
 # ─── Mapeo de categorías ──────────────────────────────────────
 CATEGORY_MAP = {
     "RESTAURACIÓN":                  "Bares, Restaurantes y ocio",

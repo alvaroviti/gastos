@@ -1051,7 +1051,13 @@ const SALARY_MONTHLY = {
 function getSalaryForMonth(mes) {
   // mes = "2026-04"
   const year = mes.slice(0,4);
-  return SALARY_MONTHLY[year] || 0;
+  if (SALARY_MONTHLY[year]) return SALARY_MONTHLY[year];
+  // Años sin salario definido: último conocido + 2% por cada año de diferencia
+  const known = Object.keys(SALARY_MONTHLY).map(Number).sort((a,b)=>a-b);
+  const last = known[known.length-1];
+  const y = parseInt(year);
+  if (y > last) return Math.round(SALARY_MONTHLY[String(last)] * Math.pow(1.02, y-last) * 100) / 100;
+  return 0;
 }
 
 let allCats = [];
@@ -1881,17 +1887,10 @@ function renderConsejosBody() {
       </div>
     </div>
 
-    <!-- AI SECTION -->
-    <div class="ai-section">
-      <h2>✨ Análisis personalizado con IA</h2>
-      <p class="ai-desc">Claude analizará tus gastos de <b>${formatMes(m)}</b>, los comparará con tu historial y te dará consejos concretos y personalizados para mejorar tu ahorro.</p>
-      <button class="ai-btn" id="ai-btn" onclick="generateAIAdvice()">
-        <div class="ai-spinner" id="ai-spinner"></div>
-        <span id="ai-btn-text">✨ Generar análisis</span>
-      </button>
-      <div class="ai-response" id="ai-response"></div>
-    </div>
+    <!-- RESUMEN AUTOMÁTICO -->
+    <div class="ai-section" id="auto-analysis"></div>
   `;
+  renderAutoAnalysis();
 }
 
 function allMonthsFor12(currentMes) {
@@ -1907,98 +1906,110 @@ function allMonthsFor12(currentMes) {
   return months;
 }
 
-async function generateAIAdvice() {
-  const btn = document.getElementById('ai-btn');
-  const spinner = document.getElementById('ai-spinner');
-  const btnText = document.getElementById('ai-btn-text');
-  const responseEl = document.getElementById('ai-response');
-
-  btn.disabled = true;
-  spinner.style.display = 'block';
-  btnText.textContent = 'Analizando...';
-  responseEl.classList.remove('visible');
+function renderAutoAnalysis() {
+  const el = document.getElementById('auto-analysis');
+  if(!el) return;
 
   const m = consejosMonth;
+  const [year, mo] = m.split('-').map(Number);
   const salary = getSalaryForMonth(m);
 
-  // Build summary for AI
-  const monthData = RAW_DATA.filter(d => d.mes === m);
-  const spentSoFar = monthData.reduce((s,d)=>s+d.cantidad, 0);
+  const today = new Date();
+  const isCurrent = today.getFullYear()===year && today.getMonth()+1===mo;
+  const daysInMonth = new Date(year, mo, 0).getDate();
+  const daysElapsed = isCurrent ? today.getDate() : daysInMonth;
 
-  const catMonth = {};
-  monthData.forEach(d => { catMonth[d.categoria] = (catMonth[d.categoria]||0) + d.cantidad; });
+  // Gasto del mes y proyección
+  const monthData = RAW_DATA.filter(d=>d.mes===m);
+  const spent = monthData.reduce((s,d)=>s+d.cantidad,0);
+  const projected = (isCurrent && daysElapsed>0) ? spent/daysElapsed*daysInMonth : spent;
+  const saving = salary - projected;
+  const savingPct = salary>0 ? saving/salary*100 : 0;
 
+  // Media de gasto total de los últimos 12 meses
   const last12 = allMonthsFor12(m);
+  const totals = last12.map(mm=>RAW_DATA.filter(d=>d.mes===mm).reduce((s,d)=>s+d.cantidad,0)).filter(v=>v>0);
+  const median = arr => { if(!arr.length) return 0; const a=[...arr].sort((x,y)=>x-y); const h=Math.floor(a.length/2); return a.length%2?a[h]:(a[h-1]+a[h])/2; };
+  const avgSpend = median(totals);   // mediana: no la distorsionan pagos puntuales (hipoteca, inversión)
+  const vsAvg = avgSpend>0 ? (projected/avgSpend-1)*100 : null;
+
+  // Por categoría: este mes vs media 12 meses (solo meses con gasto)
+  const catMonth = {};
+  monthData.forEach(d=>{ catMonth[d.categoria]=(catMonth[d.categoria]||0)+d.cantidad; });
   const catAvg = {};
-  allCats.forEach(c => {
-    const vals = last12.map(mm => RAW_DATA.filter(d=>d.mes===mm&&d.categoria===c).reduce((s,d)=>s+d.cantidad,0));
-    const nonZero = vals.filter(v=>v>0);
-    catAvg[c] = nonZero.length > 0 ? nonZero.reduce((a,b)=>a+b,0)/nonZero.length : 0;
+  allCats.forEach(c=>{
+    const vals = last12.map(mm=>RAW_DATA.filter(d=>d.mes===mm&&d.categoria===c).reduce((s,d)=>s+d.cantidad,0)).filter(v=>v>0);
+    catAvg[c] = median(vals);
   });
 
-  const catSummary = Object.entries(catMonth)
-    .sort((a,b)=>b[1]-a[1])
-    .map(([c,v]) => `  - ${c}: ${v.toFixed(2)}€ (media 12m: ${catAvg[c]>0?catAvg[c].toFixed(2)+'€':'sin historial'})`)
-    .join('\n');
+  const SKIP = ['Inversión','Hipoteca','Coche Mercedes','Coche Astra','Telefono','Subscripciones','Salud','Dentista','Rutina'];
+  const optional = Object.entries(catMonth).filter(([c,v])=>!SKIP.includes(c)&&v>0).map(([c,v])=>({cat:c,val:v,avg:catAvg[c]||0}));
 
-  // Year summary
-  const yearData = RAW_DATA.filter(d=>d.anyo===m.slice(0,4));
-  const yearSpent = yearData.reduce((s,d)=>s+d.cantidad,0);
-  const yearMonths = [...new Set(yearData.map(d=>d.mes))].length;
-  const yearAvgMonth = yearMonths > 0 ? yearSpent/yearMonths : 0;
-
-  const prompt = `Eres un asesor financiero personal. Analiza los gastos de este usuario y da consejos concretos y accionables en español.
-
-DATOS DEL MES: ${formatMes(m)}
-- Salario mensual neto: ${salary.toFixed(2)}€
-- Gasto total este mes: ${spentSoFar.toFixed(2)}€
-- Ahorro / déficit este mes: ${(salary-spentSoFar).toFixed(2)}€
-
-DESGLOSE POR CATEGORÍA (vs media últimos 12 meses):
-${catSummary}
-
-CONTEXTO ANUAL ${m.slice(0,4)}:
-- Gasto acumulado: ${yearSpent.toFixed(2)}€ en ${yearMonths} meses
-- Media mensual del año: ${yearAvgMonth.toFixed(2)}€
-- Ahorro medio mensual estimado: ${(salary - yearAvgMonth).toFixed(2)}€
-
-Da un análisis estructurado con:
-1. **Valoración general** del mes (2-3 frases)
-2. **Top 3 categorías a recortar** con sugerencias concretas y cuánto podrías ahorrar
-3. **Puntos positivos** (categorías donde vas bien)
-4. **Objetivo de ahorro realista** para el próximo mes con un número concreto
-
-Sé directo, usa cifras reales del análisis, y no uses lenguaje genérico. Máximo 350 palabras.`;
-
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 1000,
-        messages: [{ role: 'user', content: prompt }]
-      })
-    });
-    const data = await res.json();
-    const text = data.content?.[0]?.text || 'No se pudo obtener respuesta.';
-
-    // Simple markdown bold render
-    const html = text
-      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-      .replace(/^(\d+\.\s)/gm, '<br><span style="color:var(--amber);font-weight:700">$1</span>')
-      .replace(/\n/g, '<br>');
-
-    responseEl.innerHTML = html;
-    responseEl.classList.add('visible');
-  } catch(e) {
-    responseEl.innerHTML = `<span style="color:var(--red)">Error al conectar con la IA. Inténtalo de nuevo.</span>`;
-    responseEl.classList.add('visible');
+  // Top 3 a recortar: primero las que superan su media; si faltan, las más grandes (recorte del 10%)
+  const over = optional.filter(r=>r.avg>0 && r.val>r.avg).sort((a,b)=>(b.val-b.avg)-(a.val-a.avg));
+  const recortes = over.slice(0,3).map(r=>({cat:r.cat, ahorro:r.val-r.avg,
+    txt:`Este mes ${fmt(r.val)} frente a lo habitual de ${fmt(r.avg)} (+${((r.val/r.avg-1)*100).toFixed(0)}%). Volver a ese nivel te ahorra ${fmt(r.val-r.avg)}.`}));
+  if(recortes.length<3){
+    optional.filter(r=>!recortes.some(x=>x.cat===r.cat)).sort((a,b)=>b.val-a.val)
+      .slice(0,3-recortes.length).forEach(r=>recortes.push({cat:r.cat, ahorro:r.val*0.10,
+        txt:`Es de tus mayores gastos opcionales este mes (${fmt(r.val)}). Un recorte del 10% te ahorra ${fmt(r.val*0.10)}.`}));
   }
 
-  btn.disabled = false;
-  spinner.style.display = 'none';
-  btnText.textContent = '🔄 Regenerar análisis';
+  // Puntos positivos: categorías por debajo de su media (o sin gasto en un mes ya cerrado)
+  const positivos = [];
+  allCats.forEach(c=>{
+    const v = catMonth[c]||0, a = catAvg[c]||0;
+    if(a<=0 || SKIP.includes(c)) return;
+    if(v>0 && v<=a*0.9) positivos.push({cat:c, dif:a-v, txt:`${fmt(v)} vs habitual ${fmt(a)} (${((v/a-1)*100).toFixed(0)}%)`});
+    else if(v===0 && !isCurrent) positivos.push({cat:c, dif:a, txt:`sin gasto este mes (lo habitual es ${fmt(a)})`});
+  });
+  positivos.sort((a,b)=>b.dif-a.dif);
+  const top2 = positivos.slice(0,3);
+
+  // Objetivo del mes siguiente
+  const nextMes = mo===12 ? `${year+1}-01` : `${year}-${String(mo+1).padStart(2,'0')}`;
+  const nextSalary = getSalaryForMonth(nextMes);
+  const baseSpend = avgSpend>0 ? avgSpend : projected;
+  const potencial = Math.min(recortes.reduce((s,r)=>s+r.ahorro,0), baseSpend*0.15);
+  const targetSpend = Math.max(baseSpend - potencial, 0);
+  const targetSaving = nextSalary - targetSpend;
+
+  // Valoración general
+  let valoracion;
+  if(saving>=0){
+    valoracion = `${isCurrent?'Vas camino de cerrar':'Cierras'} ${formatMes(m)} en positivo: ${isCurrent?'proyectas':'ahorras'} <b style="color:var(--green)">${fmt(saving)}</b> (${savingPct.toFixed(1)}% del salario).`;
+  } else {
+    valoracion = `${isCurrent?'Vas camino de cerrar':'Cierras'} ${formatMes(m)} en negativo: déficit ${isCurrent?'proyectado ':''}de <b style="color:var(--red)">${fmt(Math.abs(saving))}</b> sobre un salario de ${fmt(salary)}.`;
+  }
+  if(vsAvg!==null){
+    valoracion += ` Gastas un <b>${Math.abs(vsAvg).toFixed(0)}% ${vsAvg>=0?'más':'menos'}</b> que tu gasto habitual de los últimos 12 meses (${fmt(avgSpend)}/mes, mediana).`;
+  }
+
+  const block = (title, inner) => `<div style="margin-top:20px"><div style="font-size:11px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:var(--text-muted);margin-bottom:10px">${title}</div>${inner}</div>`;
+  const row = (dot, name, txt, right) => `<div style="display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--border)">
+      <div class="cat-dot" style="background:${dot};margin-top:5px;flex-shrink:0"></div>
+      <div style="flex:1"><div style="font-size:13px;font-weight:600">${name}</div><div style="font-size:12px;color:var(--text-muted);margin-top:2px;line-height:1.5">${txt}</div></div>
+      ${right?`<div style="font-size:13px;font-weight:700;color:var(--green);white-space:nowrap">${right}</div>`:''}
+    </div>`;
+  const colorOf = c => CAT_COLORS[allCats.indexOf(c)%CAT_COLORS.length];
+
+  el.innerHTML = `
+    <h2>📋 Resumen y consejos automáticos</h2>
+    <p class="ai-desc" style="margin-bottom:0">Calculado a partir de tus datos de <b>${formatMes(m)}</b> y tu historial de 12 meses. Las categorías fijas (hipoteca, suscripciones, salud…) no se sugieren para recorte.</p>
+    ${block('Valoración general', `<div style="font-size:14px;line-height:1.7">${valoracion}</div>`)}
+    ${block('Top 3 categorías a recortar', recortes.length
+      ? recortes.map(r=>row(colorOf(r.cat), r.cat, r.txt, '−'+fmt(r.ahorro))).join('')
+      : '<div style="font-size:13px;color:var(--text-muted)">No hay gastos opcionales este mes.</div>')}
+    ${block('Puntos positivos', top2.length
+      ? top2.map(r=>row(colorOf(r.cat), r.cat, r.txt, '')).join('')
+      : '<div style="font-size:13px;color:var(--text-muted)">Ninguna categoría está claramente por debajo de lo habitual este mes.</div>')}
+    ${block('Objetivo para '+formatMes(nextMes), `<div style="font-size:14px;line-height:1.7">
+      Si mantienes tu gasto habitual (${fmt(baseSpend)}) y aplicas los recortes sugeridos (${fmt(potencial)}), tu gasto objetivo sería de <b>${fmt(targetSpend)}</b>
+      y ${targetSaving>=0
+        ? `ahorrarías unos <b style="color:var(--green)">${fmt(targetSaving)}</b> con un salario de ${fmt(nextSalary)}.`
+        : `aún quedarías con un déficit de <b style="color:var(--red)">${fmt(Math.abs(targetSaving))}</b> con un salario de ${fmt(nextSalary)}; habría que recortar también en gastos fijos o compensar los meses con inversión.`}
+    </div>`)}
+  `;
 }
 
 // ─── EVOLUTION LOGIC ──────────────────────────────────────────

@@ -101,8 +101,9 @@ def process_excel(file_bytes: bytes) -> list:
     )
 
 def merge_data(existing: list, new_records: list) -> list:
-    new_years = set(r["anyo"] for r in new_records)
-    kept = [r for r in existing if r["anyo"] not in new_years]
+    # Reemplaza solo los meses presentes en el Excel, conserva el resto
+    new_months = set(r["mes"] for r in new_records)
+    kept = [r for r in existing if r["mes"] not in new_months]
     merged = kept + new_records
     merged.sort(key=lambda r: r["fecha"], reverse=True)
     return merged
